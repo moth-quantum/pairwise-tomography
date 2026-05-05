@@ -16,7 +16,7 @@ pip install ./pairwise-tomography
 ```
 
 ## Usage
-Check the tutorial notebook [pairwise-tomography-tutorial.ipynb](docs/pairwise-tomography-tutorial.ipynb)
+Check the tutorial notebook [tutorial.ipynb](tutorial.ipynb)
 
 ## Citation
 If you find this package useful, please cite the article
