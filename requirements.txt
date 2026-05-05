@@ -1,4 +1,6 @@
-qiskit>=0.19.6
+qiskit>=2.0
+qiskit-aer
+numpy
+scipy
 networkx
 matplotlib
-scipy

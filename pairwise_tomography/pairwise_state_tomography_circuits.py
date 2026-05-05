@@ -1,46 +1,124 @@
 """
 Pairwise tomography circuit generation
 """
-# pylint: disable=invalid-name
 import numpy as np
+from itertools import product as _product
 
 from qiskit import ClassicalRegister
-from qiskit.ignis.verification.tomography.basis.circuits import _format_registers
+from qiskit.circuit import QuantumRegister, Qubit
 
-def pairwise_state_tomography_circuits(circuit, measured_qubits):
+
+def _get_qubits(measured_qubits):
+    """Return a flat list of Qubit objects from a register, qubit, or list thereof."""
+    if isinstance(measured_qubits, Qubit):
+        return [measured_qubits]
+    if isinstance(measured_qubits, QuantumRegister):
+        return list(measured_qubits)
+    result = []
+    for item in measured_qubits:
+        if isinstance(item, Qubit):
+            result.append(item)
+        else:
+            result.extend(list(item))
+    return result
+
+
+def _bipartite_coloring(pairs):
     """
-    Generates a minimal set of circuits for pairwise state tomography.
+    BFS 2-coloring of the graph defined by pairs (integer node indices).
 
-    This performs measurement in the Pauli-basis resulting in
-    circuits for an n-qubit state tomography experiment.
+    Returns a dict mapping node -> 0 or 1 if the graph is bipartite,
+    or None if an odd cycle is found.
+    """
+    adj = {}
+    for i, j in pairs:
+        adj.setdefault(i, []).append(j)
+        adj.setdefault(j, []).append(i)
+
+    color = {}
+    for start in adj:
+        if start in color:
+            continue
+        color[start] = 0
+        queue = [start]
+        while queue:
+            node = queue.pop(0)
+            for neighbor in adj[node]:
+                if neighbor not in color:
+                    color[neighbor] = 1 - color[node]
+                    queue.append(neighbor)
+                elif color[neighbor] == color[node]:
+                    return None
+    return color
+
+
+def _bipartite_circuits(circuit, meas_qubits, coloring):
+    """
+    Generate 9 circuits that cover all 9 Pauli basis combinations for
+    any pair (i, j) where coloring[i] != coloring[j].
+
+    Qubits absent from coloring (not in any requested pair) are assigned
+    color 0 and receive the A-partition basis.
+    """
+    N = len(meas_qubits)
+    cr = ClassicalRegister(N)
+    output_circuit_list = []
+    for basis_a, basis_b in _product(['X', 'Y', 'Z'], ['X', 'Y', 'Z']):
+        circ = circuit.copy()
+        circ.add_register(cr)
+        name = []
+        for bit_index, qubit in enumerate(meas_qubits):
+            basis = basis_b if coloring.get(bit_index, 0) == 1 else basis_a
+            if basis == 'Y':
+                circ.sdg(qubit)
+            if basis != 'Z':
+                circ.h(qubit)
+            circ.measure(qubit, cr[bit_index])
+            name.append(basis)
+        circ.name = str(tuple(name))
+        output_circuit_list.append(circ)
+    return output_circuit_list
+
+
+def pairwise_state_tomography_circuits(circuit, measured_qubits, pairs_list=None):
+    """
+    Generate a minimal set of circuits for pairwise state tomography.
+
+    Measurements are in the Pauli basis. When pairs_list is given and the
+    pairs form a bipartite graph, exactly 9 circuits are produced (one per
+    Pauli basis combination across the bipartition). Otherwise the coloring
+    scheme from arXiv:1909.12814 is used: 3 uniform circuits plus
+    6 * ceil(log3(N)) heterogeneous circuits.
 
     Args:
-        circuit (QuantumCircuit): the state preparation circuit to be
-                                  tomographed.
-        measured_qubits (QuantumRegister): the qubits to be measured.
-            This can also be a list of whole QuantumRegisters or
-            individual QuantumRegister qubit tuples.
+        circuit (QuantumCircuit): the state-preparation circuit to be
+            tomographed. Must not contain a classical register.
+        measured_qubits: qubits to measure, as a QuantumRegister, a list of
+            Qubit objects, or a list of QuantumRegisters.
+        pairs_list (list[tuple] | None): pairs of indices into measured_qubits
+            for which tomography is needed. When provided, bipartite structure
+            is detected automatically. Ignored for circuit generation when the
+            graph is not bipartite.
 
     Returns:
-        A list of QuantumCircuit objects containing the original circuit
-        with state tomography measurements appended at the end.
+        list[QuantumCircuit]: circuits with tomography measurements appended.
+            Circuit names are string representations of per-qubit basis tuples,
+            e.g. "('X', 'Y', 'Z', 'X')".
     """
-
-    ### Initialisation stuff
-    if isinstance(measured_qubits, list):
-        # Unroll list of registers
-        meas_qubits = _format_registers(*measured_qubits)
-    else:
-        meas_qubits = _format_registers(measured_qubits)
-
+    meas_qubits = _get_qubits(measured_qubits)
     N = len(meas_qubits)
 
-    cr = ClassicalRegister(len(meas_qubits))
+    if pairs_list is not None:
+        coloring = _bipartite_coloring(pairs_list)
+        if coloring is not None:
+            return _bipartite_circuits(circuit, meas_qubits, coloring)
 
-    ### Uniform measurement settings
-    X = circuit.copy(name=str(('X',)*N))
-    Y = circuit.copy(name=str(('Y',)*N))
-    Z = circuit.copy(name=str(('Z',)*N))
+    cr = ClassicalRegister(N)
+
+    # Uniform measurement settings
+    X = circuit.copy(name=str(('X',) * N))
+    Y = circuit.copy(name=str(('Y',) * N))
+    Z = circuit.copy(name=str(('Z',) * N))
 
     X.add_register(cr)
     Y.add_register(cr)
@@ -57,8 +135,8 @@ def pairwise_state_tomography_circuits(circuit, measured_qubits):
 
     output_circuit_list = [X, Y, Z]
 
-    ### Heterogeneous measurement settings
-    # Generation of six possible sequences
+    # Heterogeneous measurement settings
+    # All 6 permutations of [X, Y, Z]
     sequences = []
     meas_bases = ['X', 'Y', 'Z']
     for i in range(3):
@@ -71,8 +149,7 @@ def pairwise_state_tomography_circuits(circuit, measured_qubits):
             sequence.append(meas_bases_copy[0])
             sequences.append(sequence)
 
-    # Qubit colouring
-    nlayers = int(np.ceil(np.log(float(N))/np.log(3.0)))
+    nlayers = int(np.ceil(np.log(float(N)) / np.log(3.0)))
 
     for layout in range(nlayers):
         for sequence in sequences:
@@ -80,7 +157,7 @@ def pairwise_state_tomography_circuits(circuit, measured_qubits):
             meas_layout.add_register(cr)
             meas_layout.name = ()
             for bit_index, qubit in enumerate(meas_qubits):
-                local_basis = sequence[int(float(bit_index)/float(3**layout))%3]
+                local_basis = sequence[int(float(bit_index) / float(3 ** layout)) % 3]
                 if local_basis == 'Y':
                     meas_layout.sdg(qubit)
                 if local_basis != 'Z':

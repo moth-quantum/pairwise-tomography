@@ -1,145 +1,170 @@
 """
-Utility functions
+Utility functions for two-qubit entanglement and correlation measures.
 """
 
 import numpy as np
 import scipy.linalg as la
 from scipy.optimize import minimize
-#from scipy.special import xlogy
-from qiskit.quantum_info import partial_trace, entropy, mutual_information
-from qiskit.tools import outer
+
+from qiskit.quantum_info import partial_trace, entropy, DensityMatrix
+
+
+def _outer(state):
+    """Density matrix for a pure state vector: |psi><psi|."""
+    state = np.asarray(state)
+    return np.outer(state, state.conj())
+
+
+def _mutual_information(rho):
+    """
+    Quantum mutual information I(A:B) = S(A) + S(B) - S(AB) in nats.
+
+    rho is a 4x4 two-qubit density matrix with qubit j as the more significant
+    (left) qubit and qubit i as the less significant (right) qubit.
+    """
+    dm = DensityMatrix(np.asarray(rho))
+    s_ab = entropy(dm, base=2)
+    s_j = entropy(partial_trace(dm, [0]), base=2)  # trace out qubit i
+    s_i = entropy(partial_trace(dm, [1]), base=2)  # trace out qubit j
+    return (s_i + s_j - s_ab) * np.log(2)          # convert bits -> nats
+
 
 def concurrence(state):
-    """Calculate the concurrence.
+    """
+    Calculate the concurrence of a two-qubit state.
 
     Args:
-        state (np.array): a quantum state (1x4 array) or a density matrix (4x4
-                          array)
+        state (array): a pure state vector (length 4) or density matrix (4x4).
+
     Returns:
-        float: concurrence.
+        float: concurrence in [0, 1].
+
     Raises:
-        Exception: if attempted on more than two qubits.
+        Exception: if the state does not describe exactly two qubits.
     """
     rho = np.array(state)
     if rho.ndim == 1:
-        rho = outer(state)
-    if len(state) != 4:
-        raise Exception("Concurrence is only defined for more than two qubits")
+        if len(rho) != 4:
+            raise Exception("Concurrence is only defined for two-qubit states")
+        rho = _outer(rho)
+    elif rho.shape != (4, 4):
+        raise Exception("Concurrence is only defined for two-qubit states")
 
     YY = np.fliplr(np.diag([-1, 1, 1, -1]))
     A = rho.dot(YY).dot(rho.conj()).dot(YY)
     w = la.eigvals(A)
     w = np.sort(np.real(w))
     w = np.sqrt(np.maximum(w, 0))
-    return max(0.0, w[-1] - np.sum(w[0:-1]))
+    return max(0.0, w[-1] - np.sum(w[:-1]))
 
 
 _s0 = np.array([[1, 0], [0, 1]], dtype=complex)
-_sx = np.array([[0, 1], [ 1, 0]], dtype=complex)
+_sx = np.array([[0, 1], [1, 0]], dtype=complex)
 _sy = np.array([[0, -1j], [1j, 0]], dtype=complex)
 _sz = np.array([[1, 0], [0, -1]], dtype=complex)
 _paulis = np.array([_s0, _sx, _sy, _sz])
 
-def n_vector(theta, phi):
-    """
-    Unit vector for the specified direction
-    """
 
-    n = np.array([np.sin(theta)*np.cos(phi), np.sin(theta)*np.sin(phi), np.cos(theta)])
-    return n
+def n_vector(theta, phi):
+    """Unit vector in the direction (theta, phi)."""
+    return np.array([
+        np.sin(theta) * np.cos(phi),
+        np.sin(theta) * np.sin(phi),
+        np.cos(theta),
+    ])
+
 
 def projective_measurement(theta, phi, qubit=0):
     """
-    Returns a projective measurement along the specified direction for one of
-    the two qubits.
+    Two-qubit projective measurement operators along the direction (theta, phi)
+    on one of the two qubits.
 
     Args:
-        theta (float): "latitude" angle for the direction of the measurement
-        phi (float): "longitude" angle for the direction of the measurement
-        qubit (int): 0 or 1, the qubit on which the measurement is done (default 0)
+        theta (float): polar angle.
+        phi (float): azimuthal angle.
+        qubit (int): 0 or 1 — which qubit is measured.
 
     Returns:
-        list: The two measurement operators (numpy Arrays)
+        list[np.ndarray]: [Pi_plus, Pi_minus] as 4x4 matrices.
     """
     n = n_vector(theta, phi)
-    Pi1 = 0.5 * _s0
-    Pi2 = 0.5 * _s0
-    for i in range(3):
-        Pi1 += 0.5 * n[i] * _paulis[i+1]
-        Pi2 -= 0.5 * n[i] * _paulis[i+1]
+    Pi1 = 0.5 * _s0 + 0.5 * sum(n[k] * _paulis[k + 1] for k in range(3))
+    Pi2 = 0.5 * _s0 - 0.5 * sum(n[k] * _paulis[k + 1] for k in range(3))
 
-    if qubit==0:
+    if qubit == 0:
         Pi1 = np.kron(_s0, Pi1)
         Pi2 = np.kron(_s0, Pi2)
     else:
         Pi1 = np.kron(Pi1, _s0)
         Pi2 = np.kron(Pi2, _s0)
 
-    measurement = [Pi1, Pi2]
-    return measurement
+    return [Pi1, Pi2]
+
 
 def quantum_conditional_entropy(rho, theta, phi, qubit=0):
     """
-    The quantum conditional entropy for a two-qubit state,
-    with a projective measurement in the specified direction
+    Quantum conditional entropy S(B|A) for a two-qubit state under a
+    projective measurement in the direction (theta, phi) on one qubit.
 
-    Evaluates the formula
-
-    .. math::
-
-        \\sum_k p_k S(\\rho_k^B)
-
-    where p_k is the probability of outcome k in the measurement, `\\rho_k^B` is the
-    reduced state of the non-measured qubit after the measurement, and S(\\rho) is the
-    von-Neumann entropy (log in base 2).
+    Evaluates sum_k p_k S(rho_k^B) where p_k is the outcome probability,
+    rho_k^B is the post-measurement reduced state of the other qubit, and
+    S is the von Neumann entropy (base 2).
 
     Args:
-        rho (Array): a two-qubit density operator
-        theta (float): "latitude" angle for the direction of the measurement
-        phi (float): "longitude" angle for the direction of the measurement
-        qubit (int): 0 or 1, the qubit on which the measurement is done (default 0)
+        rho (array): 4x4 two-qubit density matrix.
+        theta (float): polar angle.
+        phi (float): azimuthal angle.
+        qubit (int): 0 or 1 — which qubit is measured.
 
     Returns:
-        float: the quantum conditional entropy
+        float: quantum conditional entropy (bits).
     """
     measurement = projective_measurement(theta, phi, qubit=qubit)
     prob = np.array([np.real(np.trace(p @ rho)) for p in measurement])
-    rho_cond = [partial_trace(p @ rho @ p, [qubit]).data for p in measurement]
-    rho_cond = [rho_cond[i] / prob[i] for i in range(len(prob))]
-    s_ent = np.array(list(map(entropy, rho_cond)))
+    rho_cond = [
+        partial_trace(DensityMatrix(p @ rho @ p), [qubit]).data / prob[k]
+        for k, p in enumerate(measurement)
+    ]
+    s_ent = np.array([entropy(DensityMatrix(r), base=2) for r in rho_cond])
     return np.sum(prob * s_ent)
+
 
 def classical_correlation(rho, qubit=0):
     """
-    Calculate the truly classical correlations between two qubits.
+    Classical correlations J(B|A) between two qubits, maximized over all
+    projective measurements on qubit A.
 
-    The classical correlations are defined e.g. in Eq. (8)
-    of Phys. Rev. A 83, 052108 (2011). We use base 2 for log.
+    Defined as in Eq. (8) of Phys. Rev. A 83, 052108 (2011), base-2 entropy.
 
     Args:
-        rho (Array): a two-qubit density operator
-        qubit (int): 0 or 1, the qubit on which the measurement is done (default 0)
+        rho (array): 4x4 two-qubit density matrix.
+        qubit (int): 0 or 1 — which qubit is measured.
 
     Returns:
-        float: classical correlations
+        float: classical correlations (bits).
     """
-    assert rho.shape == (4, 4), "Not a two-qubit density matrix"
+    assert np.asarray(rho).shape == (4, 4), "Not a two-qubit density matrix"
     cc = lambda x: quantum_conditional_entropy(rho, x[0], x[1], qubit=qubit)
-    f = minimize(cc, [np.pi/2, np.pi])
-    return (entropy(partial_trace(rho, [qubit])) - f.fun)/np.log(2)
+    f = minimize(cc, [np.pi / 2, np.pi])
+    s_b = entropy(
+        partial_trace(DensityMatrix(np.asarray(rho)), [qubit]), base=2
+    )
+    return s_b - f.fun
+
 
 def discord(rho, qubit=0):
     """
-    The quantum discord between two qubits
+    Quantum discord D(B|A) between two qubits.
 
-    Quantum discord is defined in Phys. Rev. Lett. 88, 017901 (2001).
-    We use base 2 for log.
+    Defined in Phys. Rev. Lett. 88, 017901 (2001). Returns a value in [0, 1]
+    (bits).
 
     Args:
-        rho (Array): a two-qubit density operator
-        qubit (int): 0 or 1, the qubit on which the measurement is done (default 0)
+        rho (array): 4x4 two-qubit density matrix.
+        qubit (int): 0 or 1 — which qubit is measured.
 
-    Return:
-        float: quantum discord, between [0, 1]
+    Returns:
+        float: quantum discord (bits).
     """
-    return (mutual_information(rho, 2)/np.log(2) - classical_correlation(rho, qubit=qubit))
+    mi_bits = _mutual_information(rho) / np.log(2)
+    return mi_bits - classical_correlation(rho, qubit=qubit)
